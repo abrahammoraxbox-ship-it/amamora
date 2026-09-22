@@ -21,6 +21,11 @@ Abre `http://127.0.0.1:5000`.
 - Selección de alambrismo, metal, piedra, forma y tamaño.
 - Precios en CLP y carrito persistente.
 - Solicitudes de pedido guardadas en SQLite.
+- Registro, inicio de sesión, perfiles y diseños guardados.
+- Cálculo de despacho para las 16 regiones de Chile.
+- Panel administrativo de pedidos e inventario.
+- Confirmaciones por correo mediante variables SMTP.
+- Vista de prueba con cámara para dispositivos móviles.
 - Configuración de despliegue para Render.
 
 ## Pagos
