@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS inventario(id INTEGER PRIMARY KEY AUTOINCREMENT,tipo 
   for name,definition in {"usuario_id":"INTEGER","direccion":"TEXT NOT NULL DEFAULT ''","subtotal":"INTEGER NOT NULL DEFAULT 0","envio":"INTEGER NOT NULL DEFAULT 0","pago":"TEXT NOT NULL DEFAULT 'Por coordinar'"}.items():
    if name not in existing:c.execute(f"ALTER TABLE pedidos ADD COLUMN {name} {definition}")
   if not c.execute("SELECT 1 FROM inventario").fetchone():c.executemany("INSERT INTO inventario(tipo,nombre,stock) VALUES(?,?,?)",[("piedra","Amatista",25),("piedra","Cuarzo rosa",20),("piedra","Esmeralda",12),("piedra","Lapislázuli",16),("metal","Oro",10),("metal","Plata",20),("metal","Cobre",30)])
+  catalog=[("piedra",x,15) for x in ("Ágata","Ónix","Ojo de tigre","Cuarzo","Turquesa","Jade","Granate","Piedra luna","Aventurina","Perla")]+[("metal",x,20) for x in ("Oro golfi","Plata 925","Acero inoxidable")]
+  for kind,name,stock in catalog:
+   if not c.execute("SELECT 1 FROM inventario WHERE tipo=? AND nombre=?",(kind,name)).fetchone():c.execute("INSERT INTO inventario(tipo,nombre,stock) VALUES(?,?,?)",(kind,name,stock))
   email=os.environ.get("ADMIN_EMAIL");password=os.environ.get("ADMIN_PASSWORD")
   if email and password and not c.execute("SELECT 1 FROM usuarios WHERE email=?",(email.lower(),)).fetchone():c.execute("INSERT INTO usuarios(nombre,email,password,rol,creado) VALUES(?,?,?,?,?)",("Administrador",email.lower(),generate_password_hash(password),"admin",now()))
 def login_required(fn):
