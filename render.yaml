@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: amamora
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /salud
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.7
