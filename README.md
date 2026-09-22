@@ -2,6 +2,8 @@
 
 Configurador interactivo de joyas en 3D para Chile.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/abrahammoraxbox-ship-it/amamora)
+
 ## Ejecutar localmente
 
 ```bash
