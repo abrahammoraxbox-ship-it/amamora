@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+
+    <meta charset="UTF-8">
+    <title>Amamora | La Joyería de Mamá</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+
+</head>
+
+<body>
+
+<div class="hero">
+
+    <img class="logo"
+         src="{{ url_for('static', filename='images/branding/logo_a.png') }}"
+         alt="Amamora">
+
+    <h1>AMAMORA</h1>
+
+    <h2>La Joyería de Mamá</h2>
+
+    <a href="{{ url_for('categorias') }}" class="btn">
+        Crear mi joya
+    </a>
+
+</div>
+
+</body>
+
+</html>

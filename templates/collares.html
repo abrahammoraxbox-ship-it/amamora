@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Diseñar Anillo | Amamora</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+
+</head>
+
+<body>
+
+<div class="hero">
+
+    <img class="logo"
+         src="{{ url_for('static', filename='images/branding/logo_a.png') }}"
+         alt="Amamora">
+
+    <h1>Diseña tu anillo</h1>
+
+    <p class="subtitulo">
+        Paso 1 de 5 • Elige el modelo que más te guste.
+    </p>
+
+    <div class="grid-modelos">
+
+        <div class="modelo-card">
+
+            <img src="{{ url_for('static', filename='images/branding/collar.png') }}">
+
+            <h3>Solitario</h3>
+
+        </div>
+
+        <div class="modelo-card">
+
+            <img src="{{ url_for('static', filename='images/branding/collar.png') }}">
+
+            <h3>Ajustable</h3>
+
+        </div>
+
+        <div class="modelo-card">
+
+            <img src="{{ url_for('static', filename='images/branding/collar.png') }}">
+
+            <h3>Doble aro</h3>
+
+        </div>
+
+        <div class="modelo-card">
+
+            <img src="{{ url_for('static', filename='images/branding/collar.png') }}">
+
+            <h3>Alambrismo</h3>
+
+        </div>
+
+    </div>
+
+    <a href="#" class="btn">
+        Siguiente →
+    </a>
+
+</div>
+
+</body>
+
+</html>

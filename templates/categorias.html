@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elegir categoría | Amamora</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+<div class="hero">
+
+    <img class="logo"
+         src="{{ url_for('static', filename='images/branding/logo_a.png') }}"
+         alt="Amamora">
+
+    <h1>¿Qué deseas crear?</h1>
+
+    <p class="subtitulo">
+        Elige la categoría con la que deseas comenzar el diseño de tu joya.
+    </p>
+
+    <div class="grid-categorias">
+
+        <!-- ANILLOS -->
+        <a href="{{ url_for('anillos') }}" class="card">
+            <img src="{{ url_for('static', filename='images/branding/anillo.png') }}" alt="Anillos">
+            <h3>Anillos</h3>
+            <p>Diseña un anillo único.</p>
+        </a>
+
+        <!-- PULSERAS -->
+        <div class="card">
+            <img src="{{ url_for('static', filename='images/branding/pulsera.png') }}" alt="Pulseras">
+            <h3>Pulseras</h3>
+            <p>Diseña una pulsera artesanal.</p>
+        </div>
+
+        <!-- Collares -->
+        <a href="{{ url_for('collares') }}" class="card">
+            <img src="{{ url_for('static', filename='images/branding/collar.png') }}" alt="Collares">
+            <h3>Collares</h3>
+            <p>Diseña un collar único.</p>
+        </a>
+
+        <!-- ARETES -->
+        <div class="card">
+            <img src="{{ url_for('static', filename='images/branding/aretes.png') }}" alt="Aretes">
+            <h3>Diseña un par exclusivo.</h3>
+            <p>Elegancia para cualquier ocasión.</p>
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>
