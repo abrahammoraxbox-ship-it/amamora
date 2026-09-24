@@ -1,4 +1,4 @@
-import json, os, sqlite3, uuid, smtplib, secrets, re, time
+import json, os, sqlite3, uuid, smtplib, secrets, re, time, hashlib
 from io import BytesIO
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
@@ -18,6 +18,7 @@ REGIONES={"Metropolitana":3990,"Valparaíso":4490,"O’Higgins":4490,"Maule":499
 PRECIOS={"Anillo":39990,"Pulsera":45990,"Collar":52990,"Aretes":42990};EXTRAS_ALAMBRE={"Abrazo clásico":0,"Espiral solar":4000,"Trenza infinita":7000,"Nido floral":9000,"Órbita doble":6500,"Lágrima real":8000};EXTRAS_METAL={"Oro golfi":7000,"Plata 925":10000,"Acero inoxidable":0,"Cobre":-3000};PIEDRAS={"Ágata","Ónix","Ojo de tigre","Amatista","Cuarzo","Turquesa","Jade","Lapislázuli","Granate","Piedra luna","Aventurina","Perla"};FORMAS={"Redonda","Ovalada","Gota","Corazón"};PAGOS={"Mercado Pago (próximamente)","Transbank Webpay (próximamente)","Transferencia bancaria"}
 EMAIL_RE=re.compile(r"^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$")
 ATTEMPTS=defaultdict(deque)
+GOOGLE_CLIENT_ID=os.environ.get("GOOGLE_CLIENT_ID","")
 def now():return datetime.now(timezone.utc).isoformat()
 def db():c=sqlite3.connect(DATABASE,timeout=10);c.row_factory=sqlite3.Row;c.execute("PRAGMA foreign_keys=ON");return c
 def limited(bucket,maximum,window=60):
@@ -35,10 +36,10 @@ def csrf_protect():
   if not secrets.compare_digest(str(supplied),str(session.get("csrf_token",""))):return jsonify(error="Solicitud de seguridad inválida. Actualiza la página."),403
 @app.after_request
 def security_headers(response):
- response.headers["Content-Security-Policy"]="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+ response.headers["Content-Security-Policy"]="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com https://accounts.google.com; frame-src https://accounts.google.com; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
  response.headers["Referrer-Policy"]="strict-origin-when-cross-origin";response.headers["X-Content-Type-Options"]="nosniff";response.headers["X-Frame-Options"]="DENY";response.headers["Permissions-Policy"]="camera=(self), microphone=(), geolocation=(), payment=()"
  if request.is_secure:response.headers["Strict-Transport-Security"]="max-age=31536000; includeSubDomains"
- response.headers["Cache-Control"]="no-store" if request.path.startswith(("/admin","/perfil","/api")) else "public, max-age=300"
+ response.headers["Cache-Control"]="no-store" if request.path.startswith(("/admin","/perfil","/equipo","/gestion","/acceso","/registro","/recuperar","/restablecer","/verificar-correo")) else "public, max-age=300"
  return response
 def init_db():
  DATA_DIR.mkdir(exist_ok=True)
@@ -49,7 +50,12 @@ CREATE TABLE IF NOT EXISTS pedidos(id TEXT PRIMARY KEY,usuario_id INTEGER,creado
 CREATE TABLE IF NOT EXISTS inventario(id INTEGER PRIMARY KEY AUTOINCREMENT,tipo TEXT NOT NULL,nombre TEXT NOT NULL,stock INTEGER NOT NULL,activo INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS medios(id TEXT PRIMARY KEY,nombre TEXT NOT NULL,mime TEXT NOT NULL,datos BLOB NOT NULL,creado TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS catalogo(id INTEGER PRIMARY KEY AUTOINCREMENT,tipo TEXT NOT NULL,nombre TEXT NOT NULL,precio INTEGER NOT NULL DEFAULT 0,color TEXT NOT NULL DEFAULT '',opciones TEXT NOT NULL DEFAULT '[]',descripcion TEXT NOT NULL DEFAULT '',stock INTEGER NOT NULL DEFAULT 0,imagen_id TEXT,modelo_id TEXT,activo INTEGER NOT NULL DEFAULT 1,orden INTEGER NOT NULL DEFAULT 0,creado TEXT NOT NULL,actualizado TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS auditoria(id INTEGER PRIMARY KEY AUTOINCREMENT,usuario_id INTEGER,accion TEXT NOT NULL,detalle TEXT NOT NULL,creado TEXT NOT NULL);""")
+CREATE TABLE IF NOT EXISTS auditoria(id INTEGER PRIMARY KEY AUTOINCREMENT,usuario_id INTEGER,accion TEXT NOT NULL,detalle TEXT NOT NULL,creado TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tokens_cuenta(id INTEGER PRIMARY KEY AUTOINCREMENT,usuario_id INTEGER NOT NULL,tipo TEXT NOT NULL,token_hash TEXT UNIQUE NOT NULL,expira INTEGER NOT NULL,usado INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS invitaciones(id INTEGER PRIMARY KEY AUTOINCREMENT,etiqueta TEXT NOT NULL,codigo_hash TEXT UNIQUE NOT NULL,usos INTEGER NOT NULL DEFAULT 0,max_usos INTEGER NOT NULL DEFAULT 1,expira INTEGER NOT NULL,activo INTEGER NOT NULL DEFAULT 1,creado_por INTEGER,creado TEXT NOT NULL);""")
+  user_columns={x["name"] for x in c.execute("PRAGMA table_info(usuarios)").fetchall()}
+  if "verificado" not in user_columns:c.execute("ALTER TABLE usuarios ADD COLUMN verificado INTEGER NOT NULL DEFAULT 1")
+  if "google_sub" not in user_columns:c.execute("ALTER TABLE usuarios ADD COLUMN google_sub TEXT")
   existing={x["name"] for x in c.execute("PRAGMA table_info(pedidos)").fetchall()}
   for name,definition in {"usuario_id":"INTEGER","direccion":"TEXT NOT NULL DEFAULT ''","subtotal":"INTEGER NOT NULL DEFAULT 0","envio":"INTEGER NOT NULL DEFAULT 0","pago":"TEXT NOT NULL DEFAULT 'Por coordinar'"}.items():
    if name not in existing:c.execute(f"ALTER TABLE pedidos ADD COLUMN {name} {definition}")
@@ -94,12 +100,28 @@ def save_media(upload,kind):
  mid=uuid.uuid4().hex
  with db() as c:c.execute("INSERT INTO medios VALUES(?,?,?,?,?)",(mid,name,mime,data,now()))
  return mid
+def hash_token(value):return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def send_mail(to,subject,body):
+ if not os.environ.get("SMTP_HOST") or not os.environ.get("SMTP_FROM"):return False
+ m=EmailMessage();m["Subject"]=subject;m["From"]=os.environ["SMTP_FROM"];m["To"]=to;m.set_content(body)
+ try:
+  with smtplib.SMTP(os.environ["SMTP_HOST"],int(os.environ.get("SMTP_PORT",587)),timeout=15) as s:
+   if os.environ.get("SMTP_TLS","true").lower()!="false":s.starttls()
+   if os.environ.get("SMTP_USER"):s.login(os.environ["SMTP_USER"],os.environ.get("SMTP_PASSWORD",""))
+   s.send_message(m)
+  return True
+ except (OSError,smtplib.SMTPException):return False
+def issue_token(user_id,kind,ttl):
+ raw=secrets.token_urlsafe(32);expires=int(time.time())+ttl
+ with db() as c:
+  c.execute("UPDATE tokens_cuenta SET usado=1 WHERE usuario_id=? AND tipo=? AND usado=0",(user_id,kind))
+  c.execute("INSERT INTO tokens_cuenta(usuario_id,tipo,token_hash,expira) VALUES(?,?,?,?)",(user_id,kind,hash_token(raw),expires))
+ return raw
+def account_redirect(role):return url_for("admin" if role=="admin" else "gestion" if role=="trabajador" else "perfil")
 def send_confirmation(to,oid,total):
- if not os.environ.get("SMTP_HOST"):return
- m=EmailMessage();m["Subject"]=f"Pedido {oid} recibido | Amamora";m["From"]=os.environ["SMTP_FROM"];m["To"]=to;m.set_content(f"Recibimos tu solicitud {oid}. Total: {total} CLP.")
- with smtplib.SMTP(os.environ["SMTP_HOST"],int(os.environ.get("SMTP_PORT",587))) as s:s.starttls();s.login(os.environ["SMTP_USER"],os.environ["SMTP_PASSWORD"]);s.send_message(m)
+ return send_mail(to,f"Pedido {oid} recibido | Amamora",f"Recibimos tu solicitud {oid}. Total: ${total:,.0f} CLP. Pronto te contactaremos con los próximos pasos.")
 @app.context_processor
-def globals():return {"usuario_nombre":session.get("nombre"),"es_admin":session.get("rol")=="admin","es_trabajador":session.get("rol") in {"admin","trabajador"},"csrf_token":csrf_token}
+def globals():return {"usuario_nombre":session.get("nombre"),"es_admin":session.get("rol")=="admin","es_trabajador":session.get("rol") in {"admin","trabajador"},"csrf_token":csrf_token,"google_client_id":GOOGLE_CLIENT_ID}
 @app.get("/")
 def inicio():return render_template("index.html")
 @app.get("/categorias")
@@ -119,7 +141,9 @@ def acceso():
  if request.method=="POST":
   if limited("login",5,300):return render_template("auth.html",modo="acceso",error="Demasiados intentos. Espera 5 minutos."),429
   with db() as c:u=c.execute("SELECT * FROM usuarios WHERE email=?",(request.form.get("email","").lower().strip()[:254],)).fetchone()
-  if u and check_password_hash(u["password"],request.form.get("password","")):session.clear();session.permanent=True;session.update(user_id=u["id"],nombre=u["nombre"],rol=u["rol"]);target=request.args.get("next","");return redirect(target if target.startswith("/") and not target.startswith("//") else url_for("perfil"))
+  if u and check_password_hash(u["password"],request.form.get("password","")):
+   if not u["verificado"]:return render_template("auth.html",modo="acceso",error="Confirma tu correo antes de ingresar. Revisa también la carpeta de spam."),403
+   session.clear();session.permanent=True;session.update(user_id=u["id"],nombre=u["nombre"],rol=u["rol"]);target=request.args.get("next","");return redirect(target if target.startswith("/") and not target.startswith("//") else account_redirect(u["rol"]))
   error="Correo o contraseña incorrectos."
  return render_template("auth.html",modo="acceso",error=error)
 @app.route("/registro",methods=["GET","POST"])
@@ -127,20 +151,85 @@ def registro():
  error=None
  if request.method=="POST":
   if limited("register",4,600):return render_template("auth.html",modo="registro",error="Espera unos minutos antes de volver a intentarlo."),429
-  nombre=request.form.get("nombre","").strip();email=request.form.get("email","").lower().strip();password=request.form.get("password","")
+  nombre=request.form.get("nombre","").strip();email=request.form.get("email","").lower().strip();password=request.form.get("password","");company_code=request.form.get("codigo_empresa","").strip().upper()
   if not 2<=len(nombre)<=80 or not EMAIL_RE.fullmatch(email) or len(password)<10:return render_template("auth.html",modo="registro",error="Revisa el nombre, correo y usa una contraseña de al menos 10 caracteres."),400
   try:
-   with db() as c:c.execute("INSERT INTO usuarios(nombre,email,password,creado) VALUES(?,?,?,?)",(nombre,email,generate_password_hash(password),now()))
-   return redirect(url_for("acceso"))
+   role="cliente";invite=None
+   with db() as c:
+    if company_code:
+     invite=c.execute("SELECT * FROM invitaciones WHERE codigo_hash=? AND activo=1 AND usos<max_usos AND expira>?",(hash_token(company_code),int(time.time()))).fetchone()
+     if not invite:return render_template("auth.html",modo="registro",error="El código de equipo no es válido o ya venció."),400
+     role="trabajador"
+    verified=0 if os.environ.get("SMTP_HOST") else 1
+    cur=c.execute("INSERT INTO usuarios(nombre,email,password,rol,creado,verificado) VALUES(?,?,?,?,?,?)",(nombre,email,generate_password_hash(password),role,now(),verified));user_id=cur.lastrowid
+    if invite:c.execute("UPDATE invitaciones SET usos=usos+1,activo=CASE WHEN usos+1>=max_usos THEN 0 ELSE activo END WHERE id=?",(invite["id"],))
+   if not verified:
+    token=issue_token(user_id,"verificacion",3600);send_mail(email,"Confirma tu correo | Amamora",f"Hola {nombre},\n\nConfirma tu cuenta abriendo este enlace:\n{url_for('verificar_correo',token=token,_external=True)}\n\nEl enlace vence en 1 hora.")
+    return render_template("auth.html",modo="mensaje",mensaje="Te enviamos un enlace para confirmar tu correo. Revisa también la carpeta de spam.")
+   return redirect(url_for("acceso",creada=1))
   except sqlite3.IntegrityError:error="Este correo ya está registrado."
  return render_template("auth.html",modo="registro",error=error)
+@app.get("/verificar-correo/<token>")
+def verificar_correo(token):
+ with db() as c:
+  row=c.execute("SELECT * FROM tokens_cuenta WHERE token_hash=? AND tipo='verificacion' AND usado=0 AND expira>?",(hash_token(token),int(time.time()))).fetchone()
+  if not row:return render_template("auth.html",modo="mensaje",mensaje="Este enlace venció o ya fue utilizado.",error="Solicita un enlace nuevo desde el inicio de sesión."),400
+  c.execute("UPDATE usuarios SET verificado=1 WHERE id=?",(row["usuario_id"],));c.execute("UPDATE tokens_cuenta SET usado=1 WHERE id=?",(row["id"],))
+ return render_template("auth.html",modo="mensaje",mensaje="Tu correo quedó confirmado. Ya puedes ingresar.")
+@app.route("/recuperar",methods=["GET","POST"])
+def recuperar():
+ mensaje=None
+ if request.method=="POST":
+  if limited("recover",4,600):return render_template("auth.html",modo="recuperar",error="Espera unos minutos antes de volver a intentarlo."),429
+  email=request.form.get("email","").lower().strip()
+  with db() as c:u=c.execute("SELECT id,nombre,email FROM usuarios WHERE email=?",(email,)).fetchone()
+  if u and os.environ.get("SMTP_HOST"):
+   token=issue_token(u["id"],"recuperacion",1800);send_mail(u["email"],"Restablece tu contraseña | Amamora",f"Hola {u['nombre']},\n\nCrea una contraseña nueva aquí:\n{url_for('restablecer',token=token,_external=True)}\n\nEl enlace vence en 30 minutos.")
+  mensaje="Si el correo está registrado, recibirás un enlace seguro en unos minutos."
+ return render_template("auth.html",modo="recuperar",mensaje=mensaje)
+@app.route("/restablecer/<token>",methods=["GET","POST"])
+def restablecer(token):
+ with db() as c:row=c.execute("SELECT * FROM tokens_cuenta WHERE token_hash=? AND tipo='recuperacion' AND usado=0 AND expira>?",(hash_token(token),int(time.time()))).fetchone()
+ if not row:return render_template("auth.html",modo="mensaje",mensaje="Este enlace venció o ya fue utilizado.",error="Solicita uno nuevo para proteger tu cuenta."),400
+ error=None
+ if request.method=="POST":
+  password=request.form.get("password","")
+  if len(password)<10:error="Usa una contraseña de al menos 10 caracteres."
+  else:
+   with db() as c:c.execute("UPDATE usuarios SET password=? WHERE id=?",(generate_password_hash(password),row["usuario_id"]));c.execute("UPDATE tokens_cuenta SET usado=1 WHERE id=?",(row["id"],))
+   return render_template("auth.html",modo="mensaje",mensaje="Tu contraseña fue actualizada. Ya puedes ingresar.")
+ return render_template("auth.html",modo="restablecer",error=error)
+@app.post("/acceso/google")
+def acceso_google():
+ if not GOOGLE_CLIENT_ID:return jsonify(error="El acceso con Google aún no está configurado."),503
+ if limited("google-login",10,300):return jsonify(error="Demasiados intentos. Espera unos minutos."),429
+ try:
+  from google.oauth2 import id_token
+  from google.auth.transport import requests as google_requests
+  payload=id_token.verify_oauth2_token((request.get_json(silent=True) or {}).get("credential",""),google_requests.Request(),GOOGLE_CLIENT_ID)
+  email=str(payload.get("email","")).lower().strip();sub=str(payload.get("sub",""));name=str(payload.get("name") or email.split("@")[0])[:80]
+  if not payload.get("email_verified") or not EMAIL_RE.fullmatch(email) or not sub:raise ValueError
+  with db() as c:
+   u=c.execute("SELECT * FROM usuarios WHERE email=?",(email,)).fetchone()
+   if not u:
+    cur=c.execute("INSERT INTO usuarios(nombre,email,password,rol,creado,verificado,google_sub) VALUES(?,?,?,?,?,1,?)",(name,email,generate_password_hash(secrets.token_urlsafe(40)),"cliente",now(),sub));u=c.execute("SELECT * FROM usuarios WHERE id=?",(cur.lastrowid,)).fetchone()
+   else:c.execute("UPDATE usuarios SET verificado=1,google_sub=COALESCE(google_sub,?) WHERE id=?",(sub,u["id"]))
+  session.clear();session.permanent=True;session.update(user_id=u["id"],nombre=u["nombre"],rol=u["rol"])
+  return jsonify(redirect=account_redirect(u["rol"]))
+ except (ValueError,TypeError):return jsonify(error="No pudimos validar tu cuenta de Google."),401
 @app.post("/salir")
 def salir():session.clear();return redirect(url_for("inicio"))
 @app.get("/perfil")
 @login_required
 def perfil():
  with db() as c:designs=c.execute("SELECT * FROM disenos WHERE usuario_id=? ORDER BY creado DESC",(session["user_id"],)).fetchall();orders=c.execute("SELECT * FROM pedidos WHERE usuario_id=? ORDER BY creado DESC",(session["user_id"],)).fetchall()
- return render_template("perfil.html",designs=designs,orders=orders)
+ parsed=[]
+ for design in designs:
+  item=dict(design)
+  try:item["config_data"]=json.loads(item["config"])
+  except (json.JSONDecodeError,TypeError):item["config_data"]={}
+  parsed.append(item)
+ return render_template("perfil.html",designs=parsed,orders=orders)
 @app.get("/admin")
 @admin_required
 def admin():
@@ -154,6 +243,29 @@ def cambiar_rol(user_id):
  if user_id==session.get("user_id") and role!="admin":return ("No puedes quitarte tu propio acceso administrativo",400)
  with db() as c:c.execute("UPDATE usuarios SET rol=? WHERE id=?",(role,user_id))
  audit("usuario.rol",f"usuario={user_id} rol={role}");return redirect(url_for("admin"))
+@app.get("/equipo")
+@admin_required
+def equipo():
+ code=session.pop("new_invite_code",None)
+ with db() as c:
+  users=c.execute("SELECT id,nombre,email,rol,verificado,creado FROM usuarios WHERE rol IN ('trabajador','admin') ORDER BY rol,nombre").fetchall()
+  invites=c.execute("SELECT * FROM invitaciones ORDER BY id DESC LIMIT 30").fetchall()
+ return render_template("equipo.html",users=users,invites=invites,new_code=code,current_time=int(time.time()))
+@app.post("/equipo/invitaciones")
+@admin_required
+def crear_invitacion():
+ if limited("invite",10,600):return ("Espera unos minutos antes de crear más invitaciones.",429)
+ label=request.form.get("etiqueta","").strip()[:80] or "Nuevo integrante"
+ try:days=min(30,max(1,int(request.form.get("dias",7))));max_uses=min(20,max(1,int(request.form.get("max_usos",1))))
+ except ValueError:return ("Valores inválidos",400)
+ raw=f"AMA-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
+ with db() as c:c.execute("INSERT INTO invitaciones(etiqueta,codigo_hash,max_usos,expira,creado_por,creado) VALUES(?,?,?,?,?,?)",(label,hash_token(raw),max_uses,int(time.time())+days*86400,session["user_id"],now()))
+ audit("equipo.invitacion",label);session["new_invite_code"]=raw;return redirect(url_for("equipo"))
+@app.post("/equipo/invitaciones/<int:invite_id>/revocar")
+@admin_required
+def revocar_invitacion(invite_id):
+ with db() as c:c.execute("UPDATE invitaciones SET activo=0 WHERE id=?",(invite_id,))
+ audit("equipo.revocar",f"invitacion={invite_id}");return redirect(url_for("equipo"))
 @app.get("/gestion")
 @staff_required
 def gestion():
