@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS invitaciones(id INTEGER PRIMARY KEY AUTOINCREMENT,eti
   catalog_columns={x["name"] for x in c.execute("PRAGMA table_info(catalogo)").fetchall()}
   if "codigo" not in catalog_columns:c.execute("ALTER TABLE catalogo ADD COLUMN codigo TEXT NOT NULL DEFAULT ''")
   if "categoria_ref" not in catalog_columns:c.execute("ALTER TABLE catalogo ADD COLUMN categoria_ref TEXT NOT NULL DEFAULT ''")
+  prefixes={"categoria":"JOY","piedra":"PIE","material":"MAT","alambrismo":"ALA","forma":"FOR"}
+  for item in c.execute("SELECT id,tipo FROM catalogo WHERE codigo='' OR codigo IS NULL").fetchall():
+   c.execute("UPDATE catalogo SET codigo=? WHERE id=?",(f"{prefixes.get(item['tipo'],'CAT')}-{item['id']:03d}",item["id"]))
   if not c.execute("SELECT 1 FROM inventario").fetchone():c.executemany("INSERT INTO inventario(tipo,nombre,stock) VALUES(?,?,?)",[("piedra","Amatista",25),("piedra","Cuarzo rosa",20),("piedra","Esmeralda",12),("piedra","Lapislázuli",16),("metal","Oro",10),("metal","Plata",20),("metal","Cobre",30)])
   catalog=[("piedra",x,15) for x in ("Ágata","Ónix","Ojo de tigre","Cuarzo","Turquesa","Jade","Granate","Piedra luna","Aventurina","Perla")]+[("metal",x,20) for x in ("Oro golfi","Plata 925","Acero inoxidable")]
   for kind,name,stock in catalog:
