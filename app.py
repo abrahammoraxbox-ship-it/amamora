@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS invitaciones(id INTEGER PRIMARY KEY AUTOINCREMENT,eti
   existing={x["name"] for x in c.execute("PRAGMA table_info(pedidos)").fetchall()}
   for name,definition in {"usuario_id":"INTEGER","direccion":"TEXT NOT NULL DEFAULT ''","subtotal":"INTEGER NOT NULL DEFAULT 0","envio":"INTEGER NOT NULL DEFAULT 0","pago":"TEXT NOT NULL DEFAULT 'Por coordinar'"}.items():
    if name not in existing:c.execute(f"ALTER TABLE pedidos ADD COLUMN {name} {definition}")
+  existing={x["name"] for x in c.execute("PRAGMA table_info(pedidos)").fetchall()}
+  for name,definition in {"neto_estimado":"INTEGER NOT NULL DEFAULT 0","iva_estimado":"INTEGER NOT NULL DEFAULT 0"}.items():
+   if name not in existing:c.execute(f"ALTER TABLE pedidos ADD COLUMN {name} {definition}")
   if not c.execute("SELECT 1 FROM inventario").fetchone():c.executemany("INSERT INTO inventario(tipo,nombre,stock) VALUES(?,?,?)",[("piedra","Amatista",25),("piedra","Cuarzo rosa",20),("piedra","Esmeralda",12),("piedra","Lapislázuli",16),("metal","Oro",10),("metal","Plata",20),("metal","Cobre",30)])
   catalog=[("piedra",x,15) for x in ("Ágata","Ónix","Ojo de tigre","Cuarzo","Turquesa","Jade","Granate","Piedra luna","Aventurina","Perla")]+[("metal",x,20) for x in ("Oro golfi","Plata 925","Acero inoxidable")]
   for kind,name,stock in catalog:
@@ -118,8 +121,57 @@ def issue_token(user_id,kind,ttl):
   c.execute("INSERT INTO tokens_cuenta(usuario_id,tipo,token_hash,expira) VALUES(?,?,?,?)",(user_id,kind,hash_token(raw),expires))
  return raw
 def account_redirect(role):return url_for("admin" if role=="admin" else "gestion" if role=="trabajador" else "perfil")
-def send_confirmation(to,oid,total):
- return send_mail(to,f"Pedido {oid} recibido | Amamora",f"Recibimos tu solicitud {oid}. Total: ${total:,.0f} CLP. Pronto te contactaremos con los próximos pasos.")
+def money(value):return f"${value:,.0f}".replace(",",".")
+def order_lines(items):
+ lines=[]
+ for index,item in enumerate(items,1):
+  details=" · ".join(x for x in (item.get("stone"),item.get("stoneVariant"),item.get("metal"),item.get("wire"),item.get("jewelSize")) if x)
+  lines.append(f"{index}. {item.get('category','Joya personalizada')} — {details}\n   {money(item.get('price',0))} CLP")
+ return "\n".join(lines)
+def send_confirmation(to,nombre,oid,items,subtotal,shipping,total,payment):
+ body=f"""Hola {nombre},
+
+Recibimos tu solicitud de pedido en Amamora.
+
+Pedido: {oid}
+{order_lines(items)}
+
+Subtotal: {money(subtotal)} CLP
+Envío: {money(shipping)} CLP
+Total informado (IVA incluido): {money(total)} CLP
+Medio de pago: {payment}
+
+Te contactaremos para confirmar disponibilidad, fabricación y pago antes de comenzar.
+Este mensaje confirma la solicitud y no reemplaza la boleta o factura electrónica correspondiente.
+
+Amamora · Joyería hecha a mano en Chile
+"""
+ return send_mail(to,f"Recibimos tu pedido {oid} | Amamora",body)
+def notify_store(nombre,correo,region,address,oid,items,subtotal,shipping,total,payment,net,vat):
+ target=os.environ.get("STORE_EMAIL") or os.environ.get("SMTP_FROM")
+ if not target:return False
+ body=f"""NUEVO PEDIDO AMAMORA
+
+Pedido: {oid}
+Cliente: {nombre}
+Correo: {correo}
+Entrega: {address}, {region}
+
+{order_lines(items)}
+
+Subtotal: {money(subtotal)} CLP
+Envío: {money(shipping)} CLP
+Total: {money(total)} CLP
+Neto referencial: {money(net)} CLP
+IVA referencial incluido (19%): {money(vat)} CLP
+Pago: {payment}
+
+Revisar y confirmar desde el panel interno antes de fabricar.
+"""
+ return send_mail(target,f"Nuevo pedido {oid} · {money(total)} CLP",body)
+def send_status_update(to,nombre,oid,status):
+ labels={"confirmado":"Tu pedido fue confirmado.","fabricando":"Tu joya ya está en elaboración.","enviado":"Tu pedido fue despachado.","entregado":"Tu pedido fue marcado como entregado.","cancelado":"Tu pedido fue cancelado. Si tienes dudas, responde a este correo."}
+ return send_mail(to,f"Actualización de tu pedido {oid} | Amamora",f"Hola {nombre},\n\n{labels.get(status,'Tu pedido fue actualizado.')}\n\nEstado actual: {status.title()}\nPedido: {oid}\n\nAmamora · Joyería hecha a mano en Chile")
 @app.context_processor
 def globals():return {"usuario_nombre":session.get("nombre"),"es_admin":session.get("rol")=="admin","es_trabajador":session.get("rol") in {"admin","trabajador"},"csrf_token":csrf_token,"google_client_id":GOOGLE_CLIENT_ID}
 @app.get("/")
@@ -305,7 +357,13 @@ def media(media_id,filename):
 def estado_pedido(oid):
  estado=request.form.get("estado","")
  if estado not in {"solicitado","confirmado","fabricando","enviado","entregado","cancelado"}:return ("Estado inválido",400)
- with db() as c:c.execute("UPDATE pedidos SET estado=? WHERE id=?",(estado,oid))
+ with db() as c:
+  order=c.execute("SELECT nombre,correo,estado FROM pedidos WHERE id=?",(oid,)).fetchone()
+  if not order:return ("Pedido no encontrado",404)
+  c.execute("UPDATE pedidos SET estado=? WHERE id=?",(estado,oid))
+ if order["estado"]!=estado:
+  try:send_status_update(order["correo"],order["nombre"],oid,estado)
+  except Exception:app.logger.exception("Correo de estado no enviado")
  return redirect(url_for("admin"))
 @app.post("/admin/stock/<int:item_id>")
 @admin_required
@@ -351,9 +409,11 @@ def crear_pedido():
   if category not in catalog["categoria"] or wire not in catalog["alambrismo"] or metal not in catalog["material"] or stone not in catalog["piedra"] or shape not in catalog["forma"] or not 4<=size<=18:return jsonify(error="Hay una configuración de joya inválida."),400
   price=catalog["categoria"][category]+catalog["alambrismo"][wire]+catalog["material"][metal]+max(0,size-10)*1200;subtotal+=price
   validated.append({k:str(raw.get(k,""))[:80] for k in ("category","wire","metal","stone","stoneVariant","stoneColor","shape","jewelSize")}|{"size":size,"price":price})
- oid=f"AMA-{uuid.uuid4().hex[:8].upper()}";total=subtotal+shipping
- with db() as c:c.execute("INSERT INTO pedidos(id,usuario_id,creado,nombre,correo,region,direccion,items,subtotal,envio,total,pago,estado) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(oid,session.get("user_id"),now(),nombre,correo,customer["region"],direccion,json.dumps(validated,ensure_ascii=False),subtotal,shipping,total,payment,"solicitado"))
- try:send_confirmation(customer["correo"],oid,total)
+ oid=f"AMA-{uuid.uuid4().hex[:8].upper()}";total=subtotal+shipping;vat=round(total*19/119);net=total-vat
+ with db() as c:c.execute("INSERT INTO pedidos(id,usuario_id,creado,nombre,correo,region,direccion,items,subtotal,envio,total,pago,estado,neto_estimado,iva_estimado) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(oid,session.get("user_id"),now(),nombre,correo,customer["region"],direccion,json.dumps(validated,ensure_ascii=False),subtotal,shipping,total,payment,"solicitado",net,vat))
+ try:
+  send_confirmation(correo,nombre,oid,validated,subtotal,shipping,total,payment)
+  notify_store(nombre,correo,customer["region"],direccion,oid,validated,subtotal,shipping,total,payment,net,vat)
  except Exception:app.logger.exception("Correo no enviado")
  return jsonify(id=oid,total=total,estado="solicitado"),201
 @app.get("/salud")
