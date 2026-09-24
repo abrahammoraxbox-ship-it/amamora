@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS invitaciones(id INTEGER PRIMARY KEY AUTOINCREMENT,eti
   existing={x["name"] for x in c.execute("PRAGMA table_info(pedidos)").fetchall()}
   for name,definition in {"neto_estimado":"INTEGER NOT NULL DEFAULT 0","iva_estimado":"INTEGER NOT NULL DEFAULT 0"}.items():
    if name not in existing:c.execute(f"ALTER TABLE pedidos ADD COLUMN {name} {definition}")
+  catalog_columns={x["name"] for x in c.execute("PRAGMA table_info(catalogo)").fetchall()}
+  if "codigo" not in catalog_columns:c.execute("ALTER TABLE catalogo ADD COLUMN codigo TEXT NOT NULL DEFAULT ''")
+  if "categoria_ref" not in catalog_columns:c.execute("ALTER TABLE catalogo ADD COLUMN categoria_ref TEXT NOT NULL DEFAULT ''")
   if not c.execute("SELECT 1 FROM inventario").fetchone():c.executemany("INSERT INTO inventario(tipo,nombre,stock) VALUES(?,?,?)",[("piedra","Amatista",25),("piedra","Cuarzo rosa",20),("piedra","Esmeralda",12),("piedra","Lapislázuli",16),("metal","Oro",10),("metal","Plata",20),("metal","Cobre",30)])
   catalog=[("piedra",x,15) for x in ("Ágata","Ónix","Ojo de tigre","Cuarzo","Turquesa","Jade","Granate","Piedra luna","Aventurina","Perla")]+[("metal",x,20) for x in ("Oro golfi","Plata 925","Acero inoxidable")]
   for kind,name,stock in catalog:
@@ -327,8 +330,10 @@ def gestion():
 @staff_required
 def guardar_catalogo():
  try:
-  item_id=int(request.form.get("item_id") or 0);tipo=request.form.get("tipo","");nombre=request.form.get("nombre","").strip();precio=int(request.form.get("precio") or 0);stock=int(request.form.get("stock") or 0);orden=int(request.form.get("orden") or 0);color=request.form.get("color","").strip();descripcion=request.form.get("descripcion","").strip();opciones=[]
+  item_id=int(request.form.get("item_id") or 0);tipo=request.form.get("tipo","");nombre=request.form.get("nombre","").strip();codigo=request.form.get("codigo","").strip().upper();categoria_ref=request.form.get("categoria_ref","").strip();precio=int(request.form.get("precio") or 0);stock=int(request.form.get("stock") or 0);orden=int(request.form.get("orden") or 0);color=request.form.get("color","").strip();descripcion=request.form.get("descripcion","").strip();opciones=[]
   if tipo not in {"categoria","piedra","material","alambrismo","forma"} or not 2<=len(nombre)<=80 or not -1000000<=precio<=10000000 or not 0<=stock<=100000:raise ValueError("Revisa los campos del elemento.")
+  if codigo and not re.fullmatch(r"[A-Z0-9-]{3,24}",codigo):raise ValueError("El código solo puede contener letras, números y guiones.")
+  if categoria_ref not in {"","Anillo","Pulsera","Collar","Aretes"}:raise ValueError("La categoría compatible no es válida.")
   for line in request.form.get("opciones","").splitlines():
    if not line.strip():continue
    parts=[x.strip() for x in line.split(":",1)];opciones.append([parts[0][:40],parts[1] if len(parts)>1 and re.fullmatch(r"#[0-9a-fA-F]{6}",parts[1]) else color or "#8b7564"])
@@ -337,8 +342,13 @@ def guardar_catalogo():
    if item_id:
     old=c.execute("SELECT imagen_id,modelo_id FROM catalogo WHERE id=?",(item_id,)).fetchone()
     if not old:raise ValueError("El elemento no existe.")
-    c.execute("UPDATE catalogo SET tipo=?,nombre=?,precio=?,color=?,opciones=?,descripcion=?,stock=?,imagen_id=?,modelo_id=?,orden=?,actualizado=? WHERE id=?",(tipo,nombre,precio,color,json.dumps(opciones,ensure_ascii=False),descripcion[:500],stock,image_id or old["imagen_id"],model_id or old["modelo_id"],orden,now(),item_id))
-   else:c.execute("INSERT INTO catalogo(tipo,nombre,precio,color,opciones,descripcion,stock,imagen_id,modelo_id,orden,creado,actualizado) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(tipo,nombre,precio,color,json.dumps(opciones,ensure_ascii=False),descripcion[:500],stock,image_id,model_id,orden,now(),now()))
+    c.execute("UPDATE catalogo SET tipo=?,nombre=?,codigo=?,categoria_ref=?,precio=?,color=?,opciones=?,descripcion=?,stock=?,imagen_id=?,modelo_id=?,orden=?,actualizado=? WHERE id=?",(tipo,nombre,codigo,categoria_ref,precio,color,json.dumps(opciones,ensure_ascii=False),descripcion[:500],stock,image_id or old["imagen_id"],model_id or old["modelo_id"],orden,now(),item_id))
+   else:
+    cursor=c.execute("INSERT INTO catalogo(tipo,nombre,codigo,categoria_ref,precio,color,opciones,descripcion,stock,imagen_id,modelo_id,orden,creado,actualizado) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(tipo,nombre,codigo,categoria_ref,precio,color,json.dumps(opciones,ensure_ascii=False),descripcion[:500],stock,image_id,model_id,orden,now(),now()))
+    item_id=cursor.lastrowid
+   if not codigo:
+    prefix={"categoria":"JOY","piedra":"PIE","material":"MAT","alambrismo":"ALA","forma":"FOR"}[tipo]
+    codigo=f"{prefix}-{item_id:03d}";c.execute("UPDATE catalogo SET codigo=? WHERE id=?",(codigo,item_id))
   audit("catalogo.guardar",f"id={item_id or 'nuevo'} tipo={tipo} nombre={nombre}")
  except (ValueError,TypeError) as e:return render_template("gestion.html",items=[],error=str(e)),400
  return redirect(url_for("gestion"))
@@ -386,7 +396,7 @@ def inventario():
  return jsonify([dict(x) for x in rows])
 @app.get("/api/catalogo")
 def api_catalogo():
- with db() as c:rows=c.execute("SELECT id,tipo,nombre,precio,color,opciones,descripcion,stock,imagen_id,modelo_id,orden FROM catalogo WHERE activo=1 ORDER BY tipo,orden,nombre").fetchall()
+ with db() as c:rows=c.execute("SELECT id,tipo,nombre,codigo,categoria_ref,precio,color,opciones,descripcion,stock,imagen_id,modelo_id,orden FROM catalogo WHERE activo=1 ORDER BY tipo,orden,nombre").fetchall()
  result=[]
  for row in rows:
   item=dict(row);item["opciones"]=json.loads(item["opciones"] or "[]");image_id=item.pop("imagen_id");model_id=item.pop("modelo_id");item["imagen_url"]=url_for("media",media_id=image_id,filename="imagen") if image_id else None;item["modelo_url"]=url_for("media",media_id=model_id,filename="modelo.glb") if model_id else None;result.append(item)
